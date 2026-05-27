@@ -275,6 +275,88 @@ describe('POST /api/orders', () => {
     expect(res.status).toBe(200);
     expect(res.body.status).toBe('paid');
   });
+
+  it('returns 422 when flash sale has ended', async () => {
+    const { token: csrf, cookieStr } = await getCsrf();
+    const expiredFlashSaleProduct = {
+      ...product,
+      flash_sale_price: 3.0,
+      flash_sale_ends_at: new Date(Date.now() - 1000).toISOString(), // Ended 1 second ago
+    };
+    stellar.getBalance.mockResolvedValueOnce(99999);
+    mockQuery
+      .mockResolvedValueOnce({ rows: [expiredFlashSaleProduct], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [buyer], rowCount: 1 });
+
+    const res = await request(app)
+      .post('/api/orders')
+      .set('Authorization', `Bearer ${buyerToken}`)
+      .set('Cookie', cookieStr)
+      .set('X-CSRF-Token', csrf)
+      .send({ product_id: 10, quantity: 1 });
+
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('flash_sale_ended');
+    expect(res.body.message).toContain('Flash sale has ended');
+  });
+
+  it('returns 422 when flash sale has not started yet', async () => {
+    const { token: csrf, cookieStr } = await getCsrf();
+    const futureFlashSaleProduct = {
+      ...product,
+      flash_sale_price: 3.0,
+      flash_sale_starts_at: new Date(Date.now() + 3600000).toISOString(), // Starts in 1 hour
+      flash_sale_ends_at: new Date(Date.now() + 7200000).toISOString(), // Ends in 2 hours
+    };
+    stellar.getBalance.mockResolvedValueOnce(99999);
+    mockQuery
+      .mockResolvedValueOnce({ rows: [futureFlashSaleProduct], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [buyer], rowCount: 1 });
+
+    const res = await request(app)
+      .post('/api/orders')
+      .set('Authorization', `Bearer ${buyerToken}`)
+      .set('Cookie', cookieStr)
+      .set('X-CSRF-Token', csrf)
+      .send({ product_id: 10, quantity: 1 });
+
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('flash_sale_not_started');
+    expect(res.body.message).toContain('Flash sale has not started yet');
+  });
+
+  it('accepts order when flash sale is active within time window', async () => {
+    const { token: csrf, cookieStr } = await getCsrf();
+    const activeFlashSaleProduct = {
+      ...product,
+      flash_sale_price: 3.0,
+      flash_sale_starts_at: new Date(Date.now() - 3600000).toISOString(), // Started 1 hour ago
+      flash_sale_ends_at: new Date(Date.now() + 3600000).toISOString(), // Ends in 1 hour
+    };
+    stellar.getBalance.mockResolvedValueOnce(99999);
+    stellar.sendPayment.mockResolvedValueOnce('TXHASH_OK');
+    mockQuery
+      .mockResolvedValueOnce({ rows: [activeFlashSaleProduct], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [buyer], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // stock decrement
+      .mockResolvedValueOnce({ rows: [{ id: 99 }], rowCount: 1 }) // INSERT order
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // UPDATE order paid
+      .mockResolvedValueOnce({ rows: [{ id: 1 }], rowCount: 1 }) // farmer lookup
+      .mockResolvedValueOnce({
+        rows: [{ quantity: 8, low_stock_threshold: 5, low_stock_alerted: 0 }],
+        rowCount: 1,
+      }); // low-stock
+
+    const res = await request(app)
+      .post('/api/orders')
+      .set('Authorization', `Bearer ${buyerToken}`)
+      .set('Cookie', cookieStr)
+      .set('X-CSRF-Token', csrf)
+      .send({ product_id: 10, quantity: 1 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('paid');
+  });
 });
 
 describe('GET /api/orders', () => {

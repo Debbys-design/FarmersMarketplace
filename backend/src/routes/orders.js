@@ -50,7 +50,15 @@ async function getTierPrice(productId, quantity) {
 
 function isFlashSaleActive(product) {
   if (!product?.flash_sale_price || !product?.flash_sale_ends_at) return false;
-  return new Date(product.flash_sale_ends_at).getTime() > Date.now();
+  const now = Date.now();
+  const endsAt = new Date(product.flash_sale_ends_at).getTime();
+  if (endsAt <= now) return false;
+  // Check start time if it exists
+  if (product.flash_sale_starts_at) {
+    const startsAt = new Date(product.flash_sale_starts_at).getTime();
+    if (startsAt > now) return false;
+  }
+  return true;
 }
 
 async function getEffectiveUnitPrice(product, productId, quantity) {
@@ -129,6 +137,21 @@ router.post('/', auth, validate.order, async (req, res) => {
   const moq = product.min_order_quantity || 1;
   if (quantity < moq) {
     return err(res, 400, `Minimum order is ${moq} units`, 'below_moq');
+  }
+
+  // Flash sale time window validation
+  if (product.flash_sale_price && product.flash_sale_ends_at) {
+    const now = Date.now();
+    const endsAt = new Date(product.flash_sale_ends_at).getTime();
+    if (endsAt <= now) {
+      return err(res, 422, 'Flash sale has ended', 'flash_sale_ended');
+    }
+    if (product.flash_sale_starts_at) {
+      const startsAt = new Date(product.flash_sale_starts_at).getTime();
+      if (startsAt > now) {
+        return err(res, 422, 'Flash sale has not started yet', 'flash_sale_not_started');
+      }
+    }
   }
 
   const { rows: bRows } = await db.query(
