@@ -3,6 +3,7 @@ const db = require('../db/schema');
 const auth = require('../middleware/auth');
 const adminAuth = require('../middleware/adminAuth');
 const { getContractWasmHash, deployContract } = require('../utils/stellar');
+const { invokeEscrowContract } = require('../utils/stellar');
 const multer = require('multer');
 
 const STELLAR_NETWORK = (process.env.STELLAR_NETWORK || 'testnet').toLowerCase();
@@ -291,6 +292,79 @@ router.get('/farmers/pending', async (req, res) => {
      ORDER BY created_at ASC`
   );
   res.json({ success: true, data: rows });
+});
+
+// POST /api/admin/farmers/:id/verify - Set verified flag for a farmer
+router.post('/farmers/:id/verify', async (req, res) => {
+  const farmerId = req.params.id;
+  const { verified } = req.body;
+
+  if (typeof verified !== 'boolean') {
+    return res.status(400).json({ success: false, error: 'verified must be a boolean', code: 'validation_error' });
+  }
+
+  const { rows } = await db.query('SELECT id, name, email, role FROM users WHERE id = $1', [farmerId]);
+  if (!rows[0]) return res.status(404).json({ success: false, error: 'User not found' });
+  if (rows[0].role !== 'farmer') return res.status(400).json({ success: false, error: 'User is not a farmer' });
+
+  await db.query('UPDATE users SET verified = $1 WHERE id = $2', [verified, farmerId]);
+
+  // Notify farmer via email about verification status change
+  const mailer = require('../utils/mailer');
+  const farmer = rows[0];
+  const subject = verified ? '✅ You are now a verified farmer' : 'ℹ️ Farmer verification removed';
+  const message = verified
+    ? `Hello ${farmer.name},\n\nAn administrator has marked your account as verified. You will now show a verified badge on your public profile.\n\nBest regards,\nFarmers Marketplace`
+    : `Hello ${farmer.name},\n\nAn administrator has removed the verified badge from your account. If you have questions please contact support.\n\nBest regards,\nFarmers Marketplace`;
+
+  mailer
+    .sendMail({ to: farmer.email, subject, text: message })
+    .catch((e) => console.error('[Admin] Failed to send verification email:', e.message));
+
+  res.json({ success: true, message: `Farmer verified=${verified}` });
+});
+
+// POST /api/admin/disputes/:id/resolve — resolve dispute and perform escrow action
+router.post('/disputes/:id/resolve', async (req, res) => {
+  const disputeId = parseInt(req.params.id, 10);
+  const { action, resolution } = req.body; // action: 'release' | 'refund'
+
+  if (!['release', 'refund'].includes(action)) {
+    return res.status(400).json({ success: false, error: 'action must be release or refund', code: 'validation_error' });
+  }
+  if (!resolution || !String(resolution).trim()) {
+    return res.status(400).json({ success: false, error: 'resolution note is required', code: 'validation_error' });
+  }
+
+  // Load dispute and related order
+  const { rows: dRows } = await db.query('SELECT * FROM disputes WHERE id = $1', [disputeId]);
+  const dispute = dRows[0];
+  if (!dispute) return res.status(404).json({ success: false, error: 'Dispute not found' });
+
+  const { rows: orderRows } = await db.query('SELECT * FROM orders WHERE id = $1', [dispute.order_id]);
+  const order = orderRows[0];
+  if (!order) return res.status(404).json({ success: false, error: 'Related order not found' });
+
+  const platformSecret = process.env.PLATFORM_FEE_ACCOUNT_SECRET || process.env.PLATFORM_WALLET_SECRET;
+  if (!platformSecret) return res.status(500).json({ success: false, error: 'Platform secret not configured', code: 'server_error' });
+
+  try {
+    const result = await invokeEscrowContract({ action, senderSecret: platformSecret, orderId: Number(order.id) });
+    await db.query('UPDATE disputes SET status = $1, resolution = $2 WHERE id = $3', ['resolved', resolution.trim(), disputeId]);
+
+    // Optionally mark order escrow status
+    await db.query('UPDATE orders SET escrow_status = $1, stellar_tx_hash = $2 WHERE id = $3', [action === 'release' ? 'released' : 'refunded', result.txHash, order.id]);
+
+    const mailer = require('../utils/mailer');
+    const { rows: buyerRows } = await db.query('SELECT name, email FROM users WHERE id = $1', [dispute.buyer_id]);
+    const buyer = buyerRows[0];
+    mailer.sendDisputeResolvedEmail({ dispute: { ...dispute, resolution }, order, product: {}, buyer }).catch((e) => console.error('Dispute email failed:', e.message));
+
+    return res.json({ success: true, txHash: result.txHash, message: 'Dispute resolved and escrow action executed' });
+  } catch (e) {
+    console.error('[Admin][Dispute] Escrow action failed:', e.message);
+    return res.status(502).json({ success: false, error: 'Escrow action failed', detail: e.message });
+  }
 });
 
 // PATCH /api/admin/farmers/:id/verify - Approve or reject verification
