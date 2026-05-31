@@ -39,7 +39,7 @@ export default function Navbar() {
 
   return (
     <nav style={s.nav}>
-      <Link to="/" style={s.brand}>🌿 FarmersMarket</Link>
+      <NavLink to="/" end style={({ isActive }) => (isActive ? s.activeLink : s.brand)}>🌿 FarmersMarket</NavLink>
       {network && (
         <span style={{
           background: network === 'mainnet' ? '#c0392b' : '#2d6a4f',
