@@ -6,6 +6,7 @@
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
     "test": "jest --forceExit",
+    "test:coverage": "jest --forceExit --coverage",
     "test:contracts": "SKIP_CONTRACT_TESTS=false jest --forceExit --testPathPattern=escrow.contracts.test",
     "migrate": "node migrate.js",
     "migrate:rollback": "node migrate.js rollback",
@@ -34,7 +35,14 @@
       "env": {
         "NODE_ENV": "test"
       }
-    }
+    },
+    "collectCoverageFrom": [
+      "src/**/*.js",
+      "!src/__tests__/**",
+      "!src/index.js"
+    ],
+    "coverageDirectory": "coverage",
+    "coverageReporters": ["text-summary", "lcov", "html"]
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^12.1.0",
