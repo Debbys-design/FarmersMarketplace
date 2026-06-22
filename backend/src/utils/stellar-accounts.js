@@ -1,3 +1,4 @@
+const config = require('../config');
 const bip39 = require('bip39');
 const StellarHDWallet = require('stellar-hd-wallet');
 const { StellarSdk, isTestnet, server, networkPassphrase } = require('./stellar-config');
@@ -181,7 +182,7 @@ async function lookupFederationAddress(publicKey) {
 async function resolveFederationAddress(address, db) {
   if (!address || !address.includes('*')) return address;
   const [username, domain] = address.split('*');
-  const rawLocal = (process.env.FEDERATION_DOMAIN || process.env.FRONTEND_URL || 'localhost')
+  const rawLocal = (config.federationDomain || config.frontendUrl || 'localhost')
     .replace(/^https?:\/\//, '')
     .replace(/\/$/, '')
     .split(':')[0];

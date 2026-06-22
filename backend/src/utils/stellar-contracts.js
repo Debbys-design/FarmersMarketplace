@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const config = require('../config');
 const db = require('../db/schema');
 const { StellarSdk, isTestnet, server, sorobanServer, networkPassphrase } = require('./stellar-config');
 
@@ -18,6 +19,10 @@ function hashArgs(args) {
   }
 }
 
+/**
+ * Appends a row to `contract_invocations` for audit/observability. Non-fatal — errors are swallowed.
+ * @param {{ contractId: string, method: string, args: object, txHash: string|null, success: boolean, error: string|null, userId: number|null }} params
+ */
 async function logEscrowInvocation({ contractId, method, args, txHash, success, error, userId }) {
   try {
     const argsHash = hashArgs(args);
@@ -41,6 +46,13 @@ async function logEscrowInvocation({ contractId, method, args, txHash, success, 
   }
 }
 
+/**
+ * Reads all persistent ledger entries for a contract, optionally filtered by key prefix.
+ * @param {string} contractId  Strkey-encoded contract address (C…)
+ * @param {string|null} [prefix]  If set, only entries whose key starts with this string are returned
+ * @returns {Promise<Array<{ key: string, val: unknown, durability: string, lastModifiedLedgerSeq: number|null }>>}
+ * @throws {{ code: 404 }} if the contract is not found
+ */
 async function getContractState(contractId, prefix = null) {
   const contractAddress = new StellarSdk.Address(contractId);
   const ledgerKey = StellarSdk.xdr.LedgerKey.contractData(
@@ -75,6 +87,14 @@ async function getContractState(contractId, prefix = null) {
     .filter((e) => !prefix || String(e.key).startsWith(prefix));
 }
 
+/**
+ * Returns the 64-character hex WASM hash of the deployed contract bytecode.
+ * @param {string} contractId
+ * @returns {Promise<string>} Lowercase hex WASM hash
+ * @throws {{ code: 404 }} if the contract instance is not on the ledger
+ * @throws {{ code: 'not_wasm_contract' }} if the contract uses a built-in executable
+ * @throws {{ code: 'parse_error' }} if the ledger entry cannot be decoded
+ */
 async function getContractWasmHash(contractId) {
   const contractAddress = new StellarSdk.Address(contractId);
   const ledgerKey = StellarSdk.xdr.LedgerKey.contractData(
@@ -152,10 +172,20 @@ async function getContractWasmHash(contractId) {
   return hash;
 }
 
+/**
+ * Dry-runs a Soroban contract method via the RPC simulation endpoint. Never submits a transaction.
+ * Uses `SOROBAN_SIMULATION_SOURCE_PUBLIC_KEY` (or `PLATFORM_WALLET_PUBLIC_KEY`) as the fee-source account.
+ * @param {string} contractId
+ * @param {string} method  Contract function name
+ * @param {Array<{ type: string, value: unknown }>} [args]  Typed argument list
+ * @returns {Promise<{ success: boolean, fee: string|null, result: unknown, error: string|null }>}
+ * @throws {{ code: 'simulation_source_unconfigured' }} if no source account is configured
+ * @throws {{ code: 'sdk_incompatible' }} if the installed SDK lacks simulation helpers
+ */
 async function simulateContractCall(contractId, method, args = []) {
   const sourcePublic = (
-    process.env.SOROBAN_SIMULATION_SOURCE_PUBLIC_KEY ||
-    process.env.PLATFORM_WALLET_PUBLIC_KEY ||
+    config.sorobanSimulationSourcePublicKey ||
+    config.platformWalletPublicKey ||
     ''
   ).trim();
 
@@ -179,7 +209,7 @@ async function simulateContractCall(contractId, method, args = []) {
     account = await server.loadAccount(sourcePublic);
   } catch (loadErr) {
     if (loadErr.response?.status === 404) {
-      const e = new Error(`Simulation source account not found on ${process.env.STELLAR_NETWORK || 'testnet'}: ${sourcePublic}`);
+      const e = new Error(`Simulation source account not found on ${config.stellarNetwork}: ${sourcePublic}`);
       e.code = 'simulation_source_not_found';
       throw e;
     }
@@ -250,9 +280,16 @@ async function simulateContractCall(contractId, method, args = []) {
   return { success: true, fee, result: decoded, error: null };
 }
 
+/**
+ * Invokes a lifecycle action on the Soroban escrow contract and polls until confirmed.
+ * Logs every attempt to `contract_invocations`.
+ * @param {{ action: 'deposit'|'release'|'refund'|'dispute', senderSecret: string, orderId: number, buyerPublicKey: string, farmerPublicKey: string, amount: number, timeoutUnix: number, userId: number|null }} params
+ * @returns {Promise<{ txHash: string, contractId: string }>}
+ * @throws if the contract IDs are unconfigured, submission fails, or confirmation times out after 15 s
+ */
 async function invokeEscrowContract({ action, senderSecret, orderId, buyerPublicKey, farmerPublicKey, amount, timeoutUnix, userId }) {
-  const contractId = process.env.SOROBAN_ESCROW_CONTRACT_ID;
-  const xlmTokenContractId = process.env.SOROBAN_XLM_TOKEN_CONTRACT_ID;
+  const contractId = config.sorobanEscrowContractId;
+  const xlmTokenContractId = config.sorobanXlmTokenContractId;
   if (!contractId) throw new Error('SOROBAN_ESCROW_CONTRACT_ID is not configured');
   if (!xlmTokenContractId) throw new Error('SOROBAN_XLM_TOKEN_CONTRACT_ID is not configured');
 
@@ -336,6 +373,12 @@ async function invokeEscrowContract({ action, senderSecret, orderId, buyerPublic
   throw new Error(timeoutErr);
 }
 
+/**
+ * General-purpose Soroban contract invocation. Prepares, signs, submits, and polls for confirmation.
+ * @param {{ contractId: string, method: string, args?: Array<{ type: string, value: unknown }>, signerSecret: string }} params
+ * @returns {Promise<{ hash: string, result: unknown }>}
+ * @throws if the transaction fails or times out after 10 polls (2 s each)
+ */
 async function invokeContract({ contractId, method, args = [], signerSecret }) {
   const keypair = StellarSdk.Keypair.fromSecret(signerSecret);
   const source = await server.loadAccount(keypair.publicKey());
@@ -361,8 +404,14 @@ async function invokeContract({ contractId, method, args = [], signerSecret }) {
   throw new Error('Transaction confirmation timeout');
 }
 
+/**
+ * Simpler simulation wrapper used by admin routes — does not support typed arg objects.
+ * Uses `PLATFORM_WALLET_PUBLIC_KEY` as the source account.
+ * @param {{ contractId: string, method: string, args?: Array<{ type: string, value: unknown }> }} params
+ * @returns {Promise<object>} Raw Soroban RPC simulation response
+ */
 async function simulateContract({ contractId, method, args = [] }) {
-  const sourcePublic = process.env.PLATFORM_WALLET_PUBLIC_KEY;
+  const sourcePublic = config.platformWalletPublicKey;
   const account = await server.loadAccount(sourcePublic);
   const contract = new StellarSdk.Contract(contractId);
   const scArgs = args.map((arg) => StellarSdk.nativeToScVal(arg.value, { type: arg.type }));
@@ -377,6 +426,12 @@ async function simulateContract({ contractId, method, args = [] }) {
   return sim;
 }
 
+/**
+ * Attempts to decode the contract spec (ABI) from the ledger instance entry.
+ * Returns an empty array if the spec is absent or cannot be parsed — the contract still works.
+ * @param {string} contractId
+ * @returns {Promise<Array<{ name: string, params: Array<{ name: string, type: string }>, returnType: string }>>}
+ */
 async function getContractABI(contractId) {
   try {
     const contractAddress = new StellarSdk.Address(contractId);
@@ -431,6 +486,12 @@ async function getContractABI(contractId) {
   }
 }
 
+/**
+ * Runs a batch of simulation test-cases and returns fee/resource estimates for each.
+ * @param {string} contractId
+ * @param {Array<{ method: string, args?: Array<{ type: string, value: unknown }> }>} [testCases]
+ * @returns {Promise<Array<{ method: string, fee: string|null, fee_stroops: string|null, cpu_insns: number|null, mem_bytes: number|null, ledger_reads: number|null, ledger_writes: number|null, error: string|null }>>}
+ */
 async function analyzeContractFees(contractId, testCases = []) {
   const results = [];
   for (const { method, args = [] } of testCases) {
@@ -457,6 +518,13 @@ async function analyzeContractFees(contractId, testCases = []) {
   return results;
 }
 
+/**
+ * Fetches and paginates Soroban events emitted by a contract, with optional date-range filtering.
+ * Defaults to the last ~24 h of ledgers (17 280 ledgers ≈ 86 400 s at 5 s/ledger).
+ * @param {string} contractId
+ * @param {{ type?: string, from?: string, to?: string, page?: number, limit?: number }} [filters]
+ * @returns {Promise<{ events: object[], pagination: { page: number, pages: number, total: number, limit: number } }>}
+ */
 async function getContractEvents(contractId, filters = {}) {
   const { type, from, to, page = 1, limit = 20 } = filters;
   const latestLedger = await sorobanServer.getLatestLedger();
@@ -488,6 +556,12 @@ async function getContractEvents(contractId, filters = {}) {
   return { events: events.slice(offset, offset + limit), pagination: { page, pages, total, limit } };
 }
 
+/**
+ * Decodes the contract spec and returns a Map of `functionName → "(param: type, …) -> returnType"` strings.
+ * Returns an empty Map if the spec is absent or unparseable.
+ * @param {string} contractId
+ * @returns {Promise<Map<string, string>>}
+ */
 async function getContractFunctionSignatures(contractId) {
   const contractAddress = new StellarSdk.Address(contractId);
   const ledgerKey = StellarSdk.xdr.LedgerKey.contractData(
@@ -550,6 +624,12 @@ async function getContractFunctionSignatures(contractId) {
   return signatures;
 }
 
+/**
+ * Uploads WASM bytecode and instantiates a new Soroban contract in two transactions.
+ * @param {{ wasmBuffer: Buffer, deployerSecret: string }} params
+ * @returns {Promise<{ contractId: string, wasmHash: string, txHash: string }>}
+ * @throws if either upload or instantiation fails, or if the contract ID cannot be extracted
+ */
 async function deployContract({ wasmBuffer, deployerSecret }) {
   const deployerKeypair = StellarSdk.Keypair.fromSecret(deployerSecret);
   const deployerAccount = await server.loadAccount(deployerKeypair.publicKey());

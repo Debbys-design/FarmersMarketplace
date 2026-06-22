@@ -62,6 +62,13 @@ const EnvSchema = z.object({
   SOROBAN_SIMULATION_SOURCE_PUBLIC_KEY: z.string().optional(),
   SOROBAN_ESCROW_TIMEOUT_DAYS: z.coerce.number().int().positive().default(14),
 
+  // Reward token contract
+  REWARD_TOKEN_CONTRACT_ID: z.string().optional(),
+  REWARD_TOKEN_ADMIN_SECRET: z.string().optional(),
+
+  // DEX / order book
+  USDC_ISSUER: z.string().default('GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'),
+
   // Web Push
   WEB_PUSH_VAPID_PUBLIC_KEY: z.string().optional(),
   WEB_PUSH_VAPID_PRIVATE_KEY: z.string().optional(),
@@ -94,10 +101,29 @@ const config = {
   nodeEnv: env.NODE_ENV,
   jwtSecret: env.JWT_SECRET,
   refreshTokenSecret: env.REFRESH_TOKEN_SECRET || env.JWT_SECRET,
+
+  // Stellar / Soroban
   stellarNetwork: env.STELLAR_NETWORK,
   stellarHorizonUrl: env.STELLAR_HORIZON_URL || null,
+  platformFeePercent: env.PLATFORM_FEE_PERCENT ?? 0,
+  platformWalletPublicKey: env.PLATFORM_WALLET_PUBLIC_KEY || null,
+  platformFeeAccountSecret: env.PLATFORM_FEE_ACCOUNT_SECRET || null,
+  feeBumpThresholdXlm: env.FEE_BUMP_THRESHOLD_XLM ?? 2,
+  sorobanEscrowContractId: env.SOROBAN_ESCROW_CONTRACT_ID || null,
+  sorobanXlmTokenContractId: env.SOROBAN_XLM_TOKEN_CONTRACT_ID || null,
+  sorobanSimulationSourcePublicKey: env.SOROBAN_SIMULATION_SOURCE_PUBLIC_KEY || null,
+  sorobanEscrowTimeoutDays: env.SOROBAN_ESCROW_TIMEOUT_DAYS,
+  rewardTokenContractId: env.REWARD_TOKEN_CONTRACT_ID || null,
+  rewardTokenAdminSecret: env.REWARD_TOKEN_ADMIN_SECRET || null,
+  usdcIssuer: env.USDC_ISSUER,
+
+  // Origins / federation
   clientOrigin: env.CLIENT_ORIGIN,
   corsOrigin: env.CORS_ORIGIN || env.FRONTEND_ORIGIN,
+  frontendUrl: env.FRONTEND_URL,
+  federationDomain: env.FEDERATION_DOMAIN,
+
+  // Database / cache
   databaseUrl: env.DATABASE_URL || null,
   redisUrl: env.REDIS_URL || null,
   GEO_API_TIMEOUT_MS: env.GEO_API_TIMEOUT_MS,

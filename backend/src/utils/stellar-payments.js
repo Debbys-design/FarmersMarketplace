@@ -1,7 +1,6 @@
+const config = require('../config');
 const { StellarSdk, isTestnet, server, networkPassphrase } = require('./stellar-config');
 const { getBalance } = require('./stellar-accounts');
-
-const FEE_BUMP_THRESHOLD_XLM = parseFloat(process.env.FEE_BUMP_THRESHOLD_XLM || '2');
 
 async function wrapWithFeeBump(innerTx, feeAccountSecret) {
   const feeKeypair = StellarSdk.Keypair.fromSecret(feeAccountSecret);
@@ -36,8 +35,8 @@ async function sendPayment({ senderSecret, receiverPublicKey, amount, memo }) {
     throw error;
   }
 
-  const feePercent = parseFloat(process.env.PLATFORM_FEE_PERCENT || '0');
-  const platformWallet = process.env.PLATFORM_WALLET_PUBLIC_KEY;
+  const feePercent = config.platformFeePercent;
+  const platformWallet = config.platformWalletPublicKey;
   const farmerAmount =
     feePercent > 0 && platformWallet
       ? parseFloat((amount * (1 - feePercent / 100)).toFixed(7))
@@ -72,9 +71,9 @@ async function sendPayment({ senderSecret, receiverPublicKey, amount, memo }) {
   const transaction = txBuilder.build();
   transaction.sign(senderKeypair);
 
-  const feeAccountSecret = process.env.PLATFORM_FEE_ACCOUNT_SECRET;
+  const feeAccountSecret = config.platformFeeAccountSecret;
   const buyerBalance = await getBalance(senderKeypair.publicKey());
-  const usedFeeBump = feeAccountSecret && buyerBalance < FEE_BUMP_THRESHOLD_XLM;
+  const usedFeeBump = feeAccountSecret && buyerBalance < config.feeBumpThresholdXlm;
 
   let txToSubmit = transaction;
   if (usedFeeBump) {
@@ -142,8 +141,8 @@ function generatePaymentLink({ destination, amount, assetCode, assetIssuer, memo
  * @returns {{ feePercent: number, feeAmount: number, farmerAmount: number, platformWallet: string|null }}
  */
 function getPlatformFeeInfo(amount) {
-  const feePercent = parseFloat(process.env.PLATFORM_FEE_PERCENT || '0');
-  const platformWallet = process.env.PLATFORM_WALLET_PUBLIC_KEY || null;
+  const feePercent = config.platformFeePercent;
+  const platformWallet = config.platformWalletPublicKey;
   if (!feePercent || !platformWallet) {
     return { feePercent: 0, feeAmount: 0, farmerAmount: amount, platformWallet: null };
   }
@@ -176,6 +175,11 @@ async function getPathPaymentEstimate({ sourceAssetCode, sourceAssetIssuer, dest
   return { sourceAmount: parseFloat(best.source_amount), path: best.path };
 }
 
+/**
+ * Executes a path payment, letting the buyer pay in `sourceAssetCode` and the receiver get XLM.
+ * @param {{ senderSecret: string, sourceAssetCode: string, sourceAssetIssuer?: string, sendMax: number|string, receiverPublicKey: string, destAmount: number|string, memo?: string }} params
+ * @returns {Promise<string>} Transaction hash
+ */
 async function pathPayment({ senderSecret, sourceAssetCode, sourceAssetIssuer, sendMax, receiverPublicKey, destAmount, memo }) {
   const keypair = StellarSdk.Keypair.fromSecret(senderSecret);
   const account = await server.loadAccount(keypair.publicKey());
@@ -298,13 +302,20 @@ async function createPreorderClaimableBalance({ senderSecret, farmerPublicKey, a
   return { txHash: result.hash, balanceId: balance.id };
 }
 
+/**
+ * Mints reward tokens to a buyer address via the reward-token Soroban contract.
+ * Returns null (no-op) when `REWARD_TOKEN_CONTRACT_ID` or `REWARD_TOKEN_ADMIN_SECRET` are unset.
+ * @param {string} buyerAddress  Stellar public key of the recipient
+ * @param {number} amount        Token amount (i128 units)
+ * @returns {Promise<string|null>} Transaction hash, or null on skip/error
+ */
 async function mintRewardTokens(buyerAddress, amount) {
-  const contractId = process.env.REWARD_TOKEN_CONTRACT_ID;
+  const contractId = config.rewardTokenContractId;
   if (!contractId) {
     console.warn('[Stellar] REWARD_TOKEN_CONTRACT_ID not set, skipping reward mint');
     return null;
   }
-  const adminSecret = process.env.REWARD_TOKEN_ADMIN_SECRET;
+  const adminSecret = config.rewardTokenAdminSecret;
   if (!adminSecret) {
     console.warn('[Stellar] REWARD_TOKEN_ADMIN_SECRET not set, skipping reward mint');
     return null;
@@ -332,6 +343,11 @@ async function mintRewardTokens(buyerAddress, amount) {
   }
 }
 
+/**
+ * Returns the text memo of a Stellar transaction, or null if absent or unretrievable.
+ * @param {string} txHash
+ * @returns {Promise<string|null>}
+ */
 async function getMemo(txHash) {
   if (!txHash) return null;
   try {
@@ -343,12 +359,16 @@ async function getMemo(txHash) {
   }
 }
 
+/**
+ * Fetches the top-10 bids and asks for a trading pair from Horizon.
+ * Defaults to XLM/USDC using the configured `USDC_ISSUER`.
+ * @param {{ code: string, issuer: string|null }} [baseAsset]
+ * @param {{ code: string, issuer: string }} [counterAsset]
+ * @returns {Promise<{ bids: object[], asks: object[], midPrice: number }>}
+ */
 async function getOrderBook(
   baseAsset = { code: 'XLM', issuer: null },
-  counterAsset = {
-    code: 'USDC',
-    issuer: process.env.USDC_ISSUER || 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN',
-  }
+  counterAsset = { code: 'USDC', issuer: config.usdcIssuer }
 ) {
   const base =
     baseAsset.code === 'XLM'
